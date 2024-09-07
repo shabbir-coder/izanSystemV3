@@ -2,28 +2,29 @@ const mongoose = require('mongoose');
 
 const contactSchema = new mongoose.Schema({
   name: { type: String, required: true },
-
-  day1: { type: String, required: true },
-  day2: { type: String, required: true },
-  day3: { type: String, required: true },
-  day4: { type: String, required: true },
-  day5: { type: String, required: true },
-  day6: { type: String, required: true },
-  day7: { type: String, required: true },
-
   number: { type: String, required: true },
+
+  days: [{
+    inviteStatus: { type: String, default: '' }, // Status for that day
+    invitesAllocated: { type: String, default: 0 }, // Number of invites allocated for that day
+    invitesAccepted: { type: String, default: 0 }, // Number of invites accepted for that day
+  }],
+
   param1: { type: String, required: false },
   param2: { type: String, required: false },
   param3: { type: String, required: false },
+  
   isVerified : {type: Boolean, default: false},
   lastResponse: {type: String, default:''},
   lastResponseUpdatedAt: {type: Date},
-  inviteStatus: {type: String, default:''},
   isAdmin: {type: Boolean, default: false},
+
   createdBy: {type: mongoose.Types.ObjectId},
   instanceId: {type: String},
   eventId: {type: String},
-  attendeesCount: {type: String, default:0},
+  
+  hasCompletedForm: {type: Boolean, default: false},
+  overAllStatus: {type: String}
 },{timestamps: true});
 
 const chatLogs = new mongoose.Schema({
@@ -31,9 +32,11 @@ const chatLogs = new mongoose.Schema({
   isValid: {type: Boolean, default: false},
   finalResponse: {type: String},
   inviteStatus: {type: String, default: 'Pending'},
+  isCompleted: {type: Boolean, default: false},
   instanceId: {type: String},
   eventId: {type: String},
   messageTrack: {type: Number , default: null},
+  inviteIndex: {type: Number , default: null},
 }, { timestamps: true }
 );
 

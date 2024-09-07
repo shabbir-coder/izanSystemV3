@@ -55,7 +55,10 @@ exports.createInstance = async (req, res)=>{
     const url = process.env.LOGIN_CB_API;
     const instance_id = req.body.instance_id;
     let enable = true;
-    let webhook_url = process.env.IMAGE_URL + 'api/chats/recieveMessage';
+    let webhook_url = process.env.LIVE_WEBHOOK_API;
+    if(process.env.ENVIRONMET=='Development'){
+      webhook_url = process.env.DEV_WEBHOOK_API;  
+    }
     const access_token = process.env.ACCESS_TOKEN_CB
     const result = await axios.get(`${url}/set_webhook`, {params:{
       webhook_url, enable, instance_id, access_token
@@ -71,6 +74,7 @@ exports.createInstance = async (req, res)=>{
 
     const instance = new Instance(req.body);
     await instance.save();
+
     return res.status(201).send(instance);
     
   } catch (error) {

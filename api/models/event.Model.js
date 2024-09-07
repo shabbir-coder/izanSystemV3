@@ -10,9 +10,11 @@ const EventSchema = new mongoose.Schema({
   endMinute: { type: Number, required: true },
 
   hasSubEvent: { type: Boolean, default: false },
+  
   subEventDetails: { type: Array, default: [] },
 
   invitationText: { type: String, required: true },
+  subEventInvitation: { type: String, required: true },
   invitationMedia: { type: String },
   invitationMediaMime: { type: String },
 
