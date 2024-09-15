@@ -221,7 +221,7 @@ const getMessages = async (req, res)=>{
       }
 }
 
-const processContact = async (number, instance, campaign, messageTrack,  message, media, mime, messageType) => {
+const processContact1 = async (number, instance, campaign, messageTrack,  message, media, mime, messageType) => {
   const sendMessageObj = {
     number: number,
     type: 'text',
@@ -234,7 +234,8 @@ const processContact = async (number, instance, campaign, messageTrack,  message
       sendMessageObj.media_url = process.env.IMAGE_URL + media;
       sendMessageObj.type = 'media';
     }
-    
+
+
     const response = await sendMessageFunc({ ...sendMessageObj, message: reply });
     
     const updateContact = await Contact.findOne({number, eventId: campaign?._id })
@@ -281,6 +282,105 @@ const processContact = async (number, instance, campaign, messageTrack,  message
     await updateContact.save()
   
 };
+
+const processContact = async (number, instance, campaign, messageTrack,  message, media, mime, messageType) => {
+
+  const sendMessageObj = {
+    number: number,
+    type: 'text',
+    instance_id: instance?.instance_id,
+  };
+  let reply = message;
+  let inviteMedia = {}
+  if (media) {
+    inviteMedia.filename = media.split('/').pop();
+    inviteMedia.media_url = process.env.IMAGE_URL + media;
+    inviteMedia.type = 'media';
+  }
+   // Handling custom message type - only send message and return
+   await sendMessageFunc({ ...sendMessageObj, ...inviteMedia, message: reply });
+   if (messageType === 'custom') {
+    return; // Do nothing else for custom type
+  }
+
+    // For 'invite' messageType
+    const contact = await Contact.findOne({ number, eventId: campaign?._id });
+
+    // Check if there's an invite pending for the contact
+  const index = contact.days.findIndex(
+    (ele) => ele.invitesAllocated && ele.invitesAllocated !== '0'
+  );
+
+  const inviteToSend = index !== -1 ? contact.days[index] : null;
+  const eventToInvite = campaign.subEventDetails[index];
+  let subEventMedia = {}
+
+  if (inviteToSend && eventToInvite) {
+    // Reform data for invitation message
+    const reformData = {
+      ...inviteToSend?.toObject(),
+      ...contact?.toObject(),
+    };
+
+    if (eventToInvite?.media) {
+      subEventMedia.filename = eventToInvite?.media.split('/').pop();
+      subEventMedia.media_url = process.env.IMAGE_URL + eventToInvite?.media;
+      subEventMedia.type = 'media';
+    }
+
+    reply = replacePlaceholders(eventToInvite.eventText, reformData);
+  }
+
+  const response = await sendMessageFunc({ ...sendMessageObj, ...subEventMedia, message: reply });
+ // Update contact and chat log only if the messageType is 'invite'
+ if (messageType === 'invite') {
+   // Update the contact's overall status and day-specific details
+   contact.overAllStatus = 'Pending';
+   contact.hasCompletedForm = false;
+
+   contact.days = contact.days.map((day) => {
+     if (day.invitesAllocated && day.invitesAllocated !== '0') {
+       day.inviteStatus = 'Pending';
+       day.invitesAccepted = '0';
+     }
+     return day;
+   });
+
+    // Update or create a new chat log entry
+    const previousChatLog = await ChatLogs.findOneAndUpdate(
+      {
+        senderNumber: number,
+        instanceId: instance?.instance_id,
+        eventId: campaign._id,
+      },
+      {
+        $set: {
+          messageTrack: messageTrack,
+          finalResponse: '',
+          isCompleted: false,
+          inviteStatus: contact.overAllStatus,
+          updatedAt: Date.now(),
+        },
+        $unset: {
+          inviteIndex: 1,
+        },
+      },
+      {
+        upsert: true,
+        new: true,
+      }
+    );
+
+    // Increment message track and update invite index
+    previousChatLog['messageTrack']++;
+    previousChatLog['inviteIndex'] = index;
+
+    // Save updated contact and chat log
+    await contact.save();
+    await previousChatLog.save();
+
+ }
+}
 
 const sendMessagesWithDelay = async (numbers, instance, campaign, messageTrack,  message, media, mime, messageType) => {
   for (let i = 0; i < numbers.length; i++) {
@@ -344,7 +444,7 @@ const sendMessages = async (req, res)=>{
 
     const senderId = req.user.userId
     const instance = await Instance.findOne({_id:instance_id})
-    // Save the message to the database
+    
     let start = new Date();
     start.setHours(0,0,0,0);
 
@@ -379,7 +479,6 @@ const sendMessages = async (req, res)=>{
         await updateContact.save()
       }
   
-
       if(messageTrack==1){
   
         let reply = campaign?.invitationText
@@ -429,667 +528,11 @@ const sendMessages = async (req, res)=>{
 
       }
     }
-
-    // console.log('response', response.data)
-    
+   
     return res.status(201).send({message:'mesg sent'});
   } catch (error) {
     console.error(error);
     return res.status(500).json({ error: error.data });
-  }
-}
-
-
-const recieveMessagesV1 = async (req, res)=>{
-  try{
-    const messageObject = req.body;
-    // console.log(req.body?.data?.event)
-    // if(messageObject.data?.data?.messages?.[0]?.key?.fromMe === true) return res.send()
-    if(["messages.upsert"].includes(req.body?.data?.event)){
-      let message;
-      message = messageObject.data.data.messages?.[0]?.message?.extendedTextMessage?.text || messageObject.data.data.messages?.[0]?.message?.conversation || '';
-      let remoteId = messageObject.data.data.messages?.[0]?.key.remoteJid.split('@')[0];
-
-      let fromMe = messageObject.data.data.messages?.[0]?.key?.fromMe
-      let messageId = messageObject.data.data.messages?.[0]?.key?.id
-      let timeStamp = messageObject.data.data.messages?.[0]?.messageTimestamp
-
-      if(isNaN(remoteId.length)||remoteId.length>13){
-        return res.send('invalid number')
-      }
-
-      let start = new Date();
-      start.setHours(0,0,0,0);
-
-      let end = new Date();
-      end.setHours(23,59,59,999);
-
-
-      // console.log('message', messageObject.data.data.messages?.[0]?.message)
-      // console.log('remoteId', remoteId)
-
-      const recieverId = await Instance.findOne({instance_id: messageObject.instance_id})
-      const senderId = await Contact.findOne({number: remoteId, eventId: recieverId?.eventId })
-
-      // console.log(recieverId)
-      if(!senderId) return res.send('No contacts in db');
-      const currentTime = new Date();
-      currentTime.setHours(currentTime.getHours() + 2);
-      const updatedTimeISO = currentTime.toISOString();
-      
-      const previMessage = await Message.findOne({
-        senderNumber: remoteId,
-        recieverId : recieverId?._id,
-        eventId: recieverId?.eventId,
-        fromMe: false
-      }).sort({createdAt: -1})
-
-      // console.log('previMessage', previMessage)
-      const newMessage = {
-        recieverId : recieverId?._id,
-        senderNumber: remoteId,
-        instanceId: messageObject?.instance_id,
-        eventId: recieverId?.eventId,
-        fromMe: fromMe,
-        text: message,
-        type: 'text',
-        messageId,
-        timeStamp: updatedTimeISO
-      }
-	    console.log('here')
-      const savedMessage = new Message(newMessage);
-      await savedMessage.save();
-
-      const sendMessageObj={
-        number: remoteId,
-        type: 'text',
-        instance_id: messageObject?.instance_id,
-      }
-
-      const tempEvent = await Event.findOne({_id: senderId.eventId})
-
-      if(message.toLowerCase()===tempEvent?.ReportKeyword && senderId?.isAdmin){
-        if(!senderId?.isAdmin){
-          const response =  await sendMessageFunc({...sendMessageObj, message: 'Invalid Input' });
-          return res.send(true);
-        }
-        const rejectregex = new RegExp(`\\b${tempEvent.RejectionKeyword}\\b`, 'i');
-
-        const fileName = await getReportdataByTime(start,end, recieverId?._id, tempEvent?._id ,rejectregex)
-        // console.log('fileName', fileName)
-        // const fileName = 'http://5.189.156.200:84/uploads/reports/Report-1716394369435.csv'
-        sendMessageObj.filename = fileName.split('/').pop();
-        sendMessageObj.media_url= process.env.IMAGE_URL+fileName;
-        sendMessageObj.type = 'media';
-        const response =  await sendMessageFunc({...sendMessageObj, message:'Download report'});
-        return res.send(true);
-      }
-
-      if(message.toLowerCase()==='report dump' && senderId?.isAdmin){
-        if(!senderId?.isAdmin){
-          const response =  await sendMessageFunc({...sendMessageObj, message: 'Invalid Input' });
-          return res.send(true);
-        }
-        const rejectregex = new RegExp(`\\b${tempEvent.RejectionKeyword}\\b`, 'i');
-
-        const fileName = await getFullReport(start,end, recieverId?._id, tempEvent?._id ,rejectregex)
-        // console.log('fileName', fileName)
-        // const fileName = 'http://5.189.156.200:84/uploads/reports/Report-1716394369435.csv'
-        sendMessageObj.filename = fileName.split('/').pop();
-        sendMessageObj.media_url= process.env.IMAGE_URL+fileName;
-        sendMessageObj.type = 'media';
-        const response =  await sendMessageFunc({...sendMessageObj, message:'Download report dump'});
-        return res.send(true);
-      }
-      
-      if(message.toLowerCase()===tempEvent?.StatsKeyword && senderId?.isAdmin){
-        if(!senderId?.isAdmin){
-          const response =  await sendMessageFunc({...sendMessageObj, message: 'Invalid Input' });
-          return res.send(true);
-        }
-
-        const rejectregex = new RegExp(`\\b${tempEvent.RejectionKeyword}\\b`, 'i');
-
-        const replyObj = await getStats1(tempEvent?._id , recieverId,'','', rejectregex);
-
-        let replyMessage = '*Statistics*';
-        replyMessage += '\n\n';
-        replyMessage += `\n● Total nos of Invitees *${replyObj?.totalContacts}*`;
-        replyMessage += `\n● Yes *${replyObj?.yes}*`;
-        replyMessage += `\n● Guests Count *${replyObj?.guestCount}*`;
-        replyMessage += `\n● No *${replyObj?.no}*`;
-        replyMessage += `\n● Balance *${replyObj?.balance}*`;
-        
-        const response = await sendMessageFunc({...sendMessageObj, message: replyMessage});
-        return res.send(true);
-      }
-
-      if(message.toLowerCase() === `${tempEvent.initialCode}/${tempEvent?.newContactCode}` && senderId?.isAdmin){
-        // console.log('message', message)
-        let reply = 'Send new contact detail in following pattern.\nYou can copy the next message and send it again with your contact details';
-        let Newreply = 'New_Contact\n'
-        Newreply += '\nName: John Doe'
-        Newreply += '\nInvites: 1/2/3/all'
-        Newreply += '\nISD code: 91'
-        Newreply += '\nNumber: 9999999999'
-        Newreply += '\nParam1: '
-        Newreply += '\nParam2: '
-        Newreply += '\nParam3: '
-
-        const response1 = await sendMessageFunc({...sendMessageObj,message: reply });
-        await new Promise(resolve => setTimeout(resolve, 2000));
-        const response2 = await sendMessageFunc({...sendMessageObj,message: Newreply });
-
-        return res.send('not a valid code')
-      }
-     
-      if (previMessage && previMessage.text.toLowerCase() === `${tempEvent.initialCode}/${tempEvent?.newContactCode}` && senderId?.isAdmin && !newMessage.fromMe) {
-        // console.log('new_contact', message.split('\n')[0].toLowerCase())
-        if (message.split('\n')[0].toLowerCase() === 'new_contact') {
-          const result = {};
-          const lines = message.split('\n');
-          // console.log('split', lines);
-      
-          lines.slice(2).forEach(item => {
-            let [key, value] = item.split(':').map(part => part.trim());
-            key = key.toLowerCase().replace(/ /g, ''); // Normalize key
-      
-            if (key === 'name') {
-              result.name = value || null;
-            } else if (key === 'invites') {
-              result.invites = value || null;
-            } else if (key === 'isdcode') {
-              result.isdCode = value || '';
-            } else if (key === 'number') {
-              result.number = (result.isdCode ? result.isdCode : '') + (value || '');
-            } else {
-              result[key] = value || null;
-            }
-          });
-      
-          result['createdBy'] = senderId?._id;
-          result['instanceId'] = recieverId?._id || null;
-          result['eventId'] = recieverId?.eventId;
-          result['inviteStatus'] = 'Pending';
-      
-          const { name, number } = result; // Extract name and number from result
-      
-          const existingContact = await Contact.findOne({
-            eventId: recieverId?.eventId,
-            $or: [
-              { name },
-              { number }
-            ]
-          });
-      
-          if (existingContact) {
-            let errorMessage = 'Contact already exists with the same ';
-            const errors = [];
-            if (existingContact.name === name) errors.push('name');
-            if (existingContact.number === number) errors.push('number');
-      
-            errorMessage += errors.join(' or ') + '.';
-            const response = await sendMessageFunc({...sendMessageObj,message: errorMessage });
-            return res.status(400).send({ error: errorMessage });
-          }
-      
-          const contact = new Contact(result);
-          await contact.save(); // Ensure the save operation is performed
-          const response = await sendMessageFunc({...sendMessageObj,message: 'Contact saved' });
-          return res.status(201).send('contact');
-        }
-      }
-      
-
-      const previousChatLog = await ChatLogs.findOne(
-        {
-          senderNumber: remoteId,
-          instanceId: messageObject?.instance_id,
-          eventId: senderId.eventId
-        },
-      ).sort({ updatedAt: -1 });
-      // console.log('previousChatLog',previousChatLog)
-      if(fromMe) {
-        const campaign = await Event.findOne({_id: recieverId?.eventId})
-        const code = message.split('/') 
-        if(code[0].toLowerCase() === campaign.initialCode.toLowerCase()){
-          const codeType = code[1].toLowerCase()
-
-          if(codeType === campaign.inviteCode){
-
-            let reply = campaign?.invitationText
-            if(campaign?.invitationMedia){              
-              sendMessageObj.filename = campaign?.invitationMedia.split('/').pop();
-              sendMessageObj.media_url= process.env.IMAGE_URL+campaign?.invitationMedia;
-              sendMessageObj.type = 'media';
-            }
-            senderId.lastResponse = '';
-            senderId.lastResponseUpdatedAt= Date.now();
-            senderId.attendeesCount = '0';
-            senderId.inviteStatus ='Pending';
-            await senderId.save()
-
-            const response = await sendMessageFunc({...sendMessageObj,message: reply });
-
-            const NewChatLog = await ChatLogs.findOneAndUpdate(
-              {
-                senderNumber: remoteId,
-                instanceId: messageObject?.instance_id,
-                eventId : campaign._id,
-                inviteStatus: 'Pending',
-                messageTrack:  1
-              },
-              {
-                $set: {
-                  updatedAt: Date.now(),
-                }
-              },
-              {
-                upsert: true, // Create if not found, update if found
-                new: true // Return the modified document rather than the original
-              }
-            )
-
-            return res.send('invitemessageSend')
-
-          } else if(codeType === campaign.acceptCode){
-
-            let reply = campaign?.thankYouText
-            if(campaign?.thankYouMedia){              
-              sendMessageObj.filename = campaign?.thankYouMedia.split('/').pop();
-              sendMessageObj.media_url= process.env.IMAGE_URL+campaign?.thankYouMedia;
-              sendMessageObj.type = 'media';
-            }
-
-            if(senderId.invites!='1'){
-              if(code[2]){
-                senderId.lastResponse = message;
-                senderId.lastResponseUpdatedAt= Date.now();
-                senderId.attendeesCount = code[2];
-                senderId.inviteStatus ='Accepted';
-              }else{
-                previousChatLog.messageTrack = 2;
-                previousChatLog.save()
-                reply = campaign?.messageForMoreThanOneInvites
-                const response = await sendMessageFunc({...sendMessageObj,message: reply });
-                return res.send('More Invites')
-              }
-            }else{
-              senderId.lastResponse = message;
-              senderId.lastResponseUpdatedAt= Date.now();
-              senderId.attendeesCount = senderId.invites;
-              senderId.inviteStatus ='Accepted';
-            }
-            
-            previousChatLog.messageTrack = 3;
-            previousChatLog.finalResponse = message;
-            previousChatLog.inviteStatus = 'Accepted';
-            previousChatLog.updatedAt= Date.now();
-
-            // console.log('previousChatLog',previousChatLog);
-            await senderId.save();
-            await previousChatLog.save(); 
-            const response = await sendMessageFunc({...sendMessageObj,message: reply }); 
-            return res.send('acceptmessageSend')
-
-          } else if(codeType === campaign.rejectCode){
-            previousChatLog['messageTrack']=3;
-            previousChatLog['finalResponse']=message.toLowerCase();
-            previousChatLog.updatedAt= Date.now();
-            let reply = campaign?.messageForRejection
-
-            if(true){
-              if(senderId.inviteStatus==='Accepted' && code[2]<senderId.attendeesCount){
-                senderId.lastResponse = message;
-                senderId.lastResponseUpdatedAt= Date.now();
-                senderId.attendeesCount = (+senderId.attendeesCount)-(+code[2])
-                await senderId.save()
-                reply = campaign?.thankYouText
-                  if(campaign?.thankYouMedia){              
-                    sendMessageObj.filename = campaign?.thankYouMedia.split('/').pop();
-                    sendMessageObj.media_url= process.env.IMAGE_URL+campaign?.thankYouMedia;
-                    sendMessageObj.type = 'media';
-                  }
-
-              }else{
-                senderId.lastResponse = message;
-                senderId.lastResponseUpdatedAt= Date.now();
-                senderId.inviteStatus ='Rejected';
-                senderId.attendeesCount = '0'
-                await senderId.save()
-                previousChatLog.inviteStatus = 'Rejected';
-              }
-            }
-
-            await previousChatLog.save()
-            const response = await sendMessageFunc({...sendMessageObj,message: reply }); 
-
-            return res.send('rejectmessageSend')
-
-          }
-        }
-        return res.send('nothing')
-      }
-
-      let reply;
-      // console.log('previousChatLog', previousChatLog)
-
-
-      if(!previousChatLog){
-        const campaignData = await Event.find({_id: recieverId.eventId})
-        console.log({campaignData})
-        for (let campaign of campaignData){
-          let contact;
-          if(true){
-            contact = await Contact.findOne({number: remoteId, eventId: campaign?._id.toString()})
-            // console.log({contact})
-            if(!contact) {
-              // reply = campaign.numberVerificationFails;
-              // const response = await sendMessageFunc({...sendMessageObj,message: reply });
-              return res.send('Account not found')
-            }
-          }
-          if(campaign.startingKeyword.toLowerCase() === message.toLowerCase()){
-            const currentTime = moment();
-           
-            const startingTime = moment(campaign.startDate)
-            .set('hour', campaign.startHour)
-            .set('minute', campaign.startMinute);
-      
-          const endingTime = moment(campaign.endDate)
-            .set('hour', campaign.endHour)
-            .set('minute', campaign.endMinute);
-
-            if (!currentTime.isBetween(startingTime, endingTime)) {
-              const response =  await sendMessageFunc({...sendMessageObj,message: campaign?.messageForClosedInvitations });
-              return res.send(true);      
-            }
-            let reply = campaign?.invitationText
-            if(campaign?.invitationMedia){              
-              sendMessageObj.filename = campaign?.invitationMedia.split('/').pop();
-              sendMessageObj.media_url= process.env.IMAGE_URL+campaign?.invitationMedia;
-              sendMessageObj.type = 'media';
-            }
-            const response = await sendMessageFunc({...sendMessageObj,message: reply });
-            const NewChatLog = await ChatLogs.findOneAndUpdate(
-              {
-                senderNumber: remoteId,
-                instanceId: messageObject?.instance_id,
-                updatedAt: { $gte: start, $lt: end },
-                eventId : campaign._id,
-                messageTrack:  1
-              },
-              {
-                $set: {
-                  updatedAt: Date.now(),
-                  isValid: contact? true: false
-                }
-              },
-              {
-                upsert: true, // Create if not found, update if found
-                new: true // Return the modified document rather than the original
-              }
-            )
-            return res.send('firstMessage sent')
-          }
-        }
-        return res.send('No active campaign found')
-       
-      }
-
-      const campaign = await Event.findOne({_id: previousChatLog?.eventId})
-
-      if(campaign?.RewriteKeyword?.toLowerCase() === message?.toLowerCase()){
-        if(!previousChatLog || previousChatLog.messageTrack===1){
-          const response =  await sendMessageFunc({...sendMessageObj,message: 'Nothing to cancel' });
-          return res.send(true);
-        }
-        previousChatLog['messageTrack']=1
-        previousChatLog['finalResponse']=''
-        previousChatLog['inviteStatus']='Pending'
-        await previousChatLog.save()
-        if(true){
-          senderId.lastResponse = '';
-          senderId.lastResponseUpdatedAt= Date.now();
-          senderId.inviteStatus ='Pending';
-          senderId.attendeesCount='0'
-          senderId.save();
-        }
-        let reply = campaign?.invitationText
-          if(campaign?.invitationMedia){              
-            sendMessageObj.filename = campaign?.invitationMedia.split('/').pop();
-            sendMessageObj.media_url= process.env.IMAGE_URL+campaign?.invitationMedia;
-            sendMessageObj.type = 'media';
-          }
-        const response =  await sendMessageFunc({...sendMessageObj,message: reply });
-        return res.send('after change message')
-      }
-
-      if(campaign.startingKeyword.toLowerCase() === message.toLowerCase()){
-        const currentTime = moment();
-        
-        const startingTime = moment(campaign.startDate)
-        .set('hour', campaign.startHour)
-        .set('minute', campaign.startMinute);
-  
-      const endingTime = moment(campaign.endDate)
-        .set('hour', campaign.endHour)
-        .set('minute', campaign.endMinute);
-
-        if (!currentTime.isBetween(startingTime, endingTime)) {
-          const response =  await sendMessageFunc({...sendMessageObj,message: campaign?.messageForClosedInvitations });
-          return res.send(true);      
-        }
-        let reply = campaign?.invitationText
-        if(campaign?.invitationMedia){              
-          sendMessageObj.filename = campaign?.invitationMedia.split('/').pop();
-          sendMessageObj.media_url= process.env.IMAGE_URL+campaign?.invitationMedia;
-          sendMessageObj.type = 'media';
-        }
-        const response = await sendMessageFunc({...sendMessageObj,message: reply });
-        const NewChatLog = await ChatLogs.findOneAndUpdate(
-          {
-            senderNumber: remoteId,
-            instanceId: messageObject?.instance_id,
-            eventId : campaign._id,
-          },
-          {
-            $set: {
-              updatedAt: Date.now(),
-              messageTrack:  1
-            }
-          },
-          {
-            upsert: true, // Create if not found, update if found
-            new: true // Return the modified document rather than the original
-          }
-        )
-        return res.send('firstMessage sent')
-      }
-      
-      // console.log({campaign})
-	  
-	  if(previousChatLog?.messageTrack===2){
-        const numbersString = extractNumberOrAll(message.toLowerCase());
-        function extractNumberOrAll(input) {
-          const numberMatch = input.match(/\d+/);
-          if (numberMatch) {
-            return numberMatch[0];
-          } else if (/\ball\b/i.test(input)) {
-            return "all";
-          } else {
-            return null; // or any default value you want to return if neither is found
-          }
-        }
-        if(numbersString !== null && (numbersString == senderId.invites.toLowerCase() || (senderId.invites.toLowerCase() === "all" || (!isNaN(numbersString) && +numbersString <= senderId.invites)))){
-          console.log(numbersString)
-          let reply = campaign?.thankYouText
-          if(campaign?.thankYouMedia){              
-            sendMessageObj.filename = campaign?.thankYouMedia.split('/').pop();
-            sendMessageObj.media_url= process.env.IMAGE_URL+campaign?.thankYouMedia;
-            sendMessageObj.type = 'media';
-          }
-
-          previousChatLog.messageTrack = 3;
-          previousChatLog.finalResponse=message;
-          previousChatLog.updatedAt=Date.now();
-          previousChatLog.inviteStatus = 'Accepted';
-          // console.log('previousChatLog',previousChatLog);
-          await previousChatLog.save(); 
-  
-          senderId.lastResponse = message;
-          senderId.lastResponseUpdatedAt= Date.now();
-          senderId.attendeesCount = numbersString==='all'?'5': numbersString;
-          senderId.inviteStatus ='Accepted';
-          await senderId.save()
-
-          const response = await sendMessageFunc({...sendMessageObj,message: reply }); 
-          return res.send('thank you send')
-        }else{
-          const response = await sendMessageFunc({...sendMessageObj,message: 'Invalid Input' }); 
-          return res.send('Invalid Input')
-        }
-      }
-
-      const acceptregex = new RegExp(`\\b${campaign.acceptanceKeyword}\\b`, 'i');
-
-      if(acceptregex.test(message.trim())){
-        if( previousChatLog?.finalResponse){
-          const reply =`Your data is already saved . Type *${campaign.RewriteKeyword}* to edit your choice`
-          const response = await sendMessageFunc({...sendMessageObj,message: reply });
-          return res.send('Type Change First')
-        }
-        previousChatLog['messageTrack']=2;
-        await previousChatLog.save()
-        if(true){
-          const contact = await Contact.findOne({
-            number: remoteId,
-            eventId: campaign?._id
-          })
-          // console.log({contact})
-          if(contact.invites!='1'){
-            reply = campaign?.messageForMoreThanOneInvites
-            const response = await sendMessageFunc({...sendMessageObj,message: reply });
-            return res.send('More Invites')
-          }else{
-            let reply = campaign?.thankYouText
-            if(campaign?.thankYouMedia){              
-              sendMessageObj.filename = campaign?.thankYouMedia.split('/').pop();
-              sendMessageObj.media_url= process.env.IMAGE_URL+campaign?.thankYouMedia;
-              sendMessageObj.type = 'media';
-            }
-            
-            previousChatLog.messageTrack = 3;
-            previousChatLog.finalResponse = message;
-            previousChatLog.inviteStatus = 'Accepted';
-            previousChatLog.updatedAt= Date.now();
-
-            console.log('senderId', senderId)
-
-            senderId.lastResponse = message;
-            senderId.lastResponseUpdatedAt= Date.now();
-            senderId.attendeesCount= senderId.invites === 'all'?'5': senderId.invites;
-            senderId.inviteStatus = 'Accepted';
-
-            // console.log('previousChatLog',previousChatLog);
-            await senderId.save();
-            await previousChatLog.save(); 
-          const response = await sendMessageFunc({...sendMessageObj,message: reply }); 
-          return res.send('thank you send')
-          }
-        }else{
-          let reply = campaign?.thankYouText
-          if(campaign?.thankYouMedia){              
-            sendMessageObj.filename = campaign?.thankYouMedia.split('/').pop();
-            sendMessageObj.media_url= process.env.IMAGE_URL+campaign?.thankYouMedia;
-            sendMessageObj.type = 'media';
-          }
-          previousChatLog.messageTrack = 3;
-          previousChatLog.finalResponse = message;
-          previousChatLog.inviteStatus = 'Accepted';
-          previousChatLog.updatedAt= Date.now(),
-          // console.log('previousChatLog',previousChatLog);
-          await previousChatLog.save()
-          const response = await sendMessageFunc({...sendMessageObj,message: reply }); 
-          return res.send('thank you send')
-        }
-      }
-
-      const rejectregex = new RegExp(`\\b${campaign.RejectionKeyword}\\b`, 'i');
-
-      if(rejectregex.test(message.trim())){
-        if( previousChatLog?.finalResponse){
-          const reply =`Your data is already saved . Type *${campaign.RewriteKeyword}* to edit your choice`
-          const response = await sendMessageFunc({...sendMessageObj,message: reply });
-          return res.send('Type Change First')
-        }
-
-        previousChatLog['messageTrack']=3;
-        previousChatLog['finalResponse']=message.toLowerCase();
-        previousChatLog.inviteStatus = 'Rejected';
-        previousChatLog.updatedAt= Date.now();
-
-        if(true){
-          senderId.lastResponse = message;
-          senderId.lastResponseUpdatedAt= Date.now();
-          senderId.inviteStatus ='Rejected';
-          senderId.attendeesCount = '0'
-          await senderId.save()
-        }
-
-        await previousChatLog.save()
-        let reply = campaign?.messageForRejection
-        const response = await sendMessageFunc({...sendMessageObj,message: reply }); 
-        return res.send('rejection send')
-      }
-
-      if(campaign?.RewriteKeyword?.toLowerCase() === message?.toLowerCase()){
-        if(!previousChatLog || previousChatLog.messageTrack===1){
-          const response =  await sendMessageFunc({...sendMessageObj,message: 'Nothing to cancel' });
-          return res.send(true);
-        }
-        previousChatLog['messageTrack']=1
-        previousChatLog['finalResponse']=''
-        await previousChatLog.save()
-        let reply = campaign?.invitationText
-          if(campaign?.invitationMedia){              
-            sendMessageObj.filename = campaign?.invitationMedia.split('/').pop();
-            sendMessageObj.media_url= process.env.IMAGE_URL+campaign?.invitationMedia;
-            sendMessageObj.type = 'media';
-          }
-        const response =  await sendMessageFunc({...sendMessageObj,message: reply });
-        return res.send('after change message')
-      }
-      
-      return res.send('nothing matched')
-    }else if(["messages.update"].includes(req.body?.data?.event)){
-      
-      let data = messageObject.data.data
-      for (const elem of data) {
-        let messageId = elem.key?.id;
-        let message = await Message.findOne({ messageId });
-        if (!message) {
-          continue;
-        };
-    
-        let newStatus = {
-          status: elem.update?.status,  // Replace with the actual status name
-          time: new Date()            // Set the actual time or use a specific date
-        };
-    
-        message.messageStatus.push(newStatus);
-        await message.save();
-        // console.log('message status Updated to '+ elem.update?.status+' for '+ message.text)
-      }
-      return res.send('status updated')
-    }
-    
-    else{
-      return res.send(false)
-    }
-  }catch (error){
-    console.log(error)
-    return res.status(500).json({ error: 'Internal server error' });
   }
 }
 
@@ -1122,7 +565,6 @@ const recieveMessagesV2 = async (req, res)=>{
       const recieverId = await Instance.findOne({instance_id: messageObject.instance_id})
       const senderId = await Contact.findOne({number: remoteId, eventId: recieverId?.eventId })
 
-      // console.log(recieverId)
       if(!senderId) return res.send('No contacts in db');
       
       const currentTime = new Date();
@@ -1216,13 +658,13 @@ const recieveMessagesV2 = async (req, res)=>{
           return dayA - dayB;
         });      
 
-        sortedDays.forEach((day) => {
+        sortedDays.forEach((day, i) => {
           const stats = replyObj.dayStats[day];
-          replyMessage += `\n*${day.replace('_',' ')}*:\n`;
-          replyMessage += `  - Yes: *${stats?.yes}*\n`;
-          replyMessage += `  - No: *${stats?.no}*\n`;
+          replyMessage += `\n*${tempEvent.subEventDetails[i]?.eventName}*:\n`;
+          replyMessage += `  - Accepted: *${stats?.yes}*\n`;
+          replyMessage += `  - Rejected: *${stats?.no}*\n`;
           replyMessage += `  - Pending: *${stats?.pending}*\n`;
-          replyMessage += `  - Total Accepted Invites: *${stats?.totalAccepted}*\n`;
+          replyMessage += `  - Total Guests Count: *${stats?.totalAccepted}*\n`;
         });
         
         const response = await sendMessageFunc({...sendMessageObj, message: replyMessage});
@@ -1321,10 +763,11 @@ const recieveMessagesV2 = async (req, res)=>{
           if(codeType === campaign.inviteCode){
 
             let reply = campaign?.invitationText
+            let inviteMedia = {}
             if(campaign?.invitationMedia){              
-              sendMessageObj.filename = campaign?.invitationMedia.split('/').pop();
-              sendMessageObj.media_url= process.env.IMAGE_URL+campaign?.invitationMedia;
-              sendMessageObj.type = 'media';
+              inviteMedia.filename = campaign?.invitationMedia.split('/').pop();
+              inviteMedia.media_url= process.env.IMAGE_URL+campaign?.invitationMedia;
+              inviteMedia.type = 'media';
             }
             senderId.hasCompletedForm = false;
             senderId.overAllStatus = 'Pending'
@@ -1341,7 +784,33 @@ const recieveMessagesV2 = async (req, res)=>{
 
             await senderId.save()
 
-            const response = await sendMessageFunc({...sendMessageObj,message: reply });
+            const response = await sendMessageFunc({...sendMessageObj,...inviteMedia,message: reply });
+
+            const index = senderId.days.findIndex(
+              (ele) => ele.invitesAllocated && ele.invitesAllocated !== '0'
+            );
+          
+            const inviteToSend = index !== -1 ? senderId.days[index] : null;
+            const eventToInvite = campaign.subEventDetails[index];
+          
+            if (inviteToSend && eventToInvite) {
+              const reformData = {
+                ...inviteToSend?.toObject(),
+                ...senderId?.toObject(),
+              };
+            
+              let subEventMedia = {}
+              if (eventToInvite?.media) {
+                subEventMedia.filename = eventToInvite?.media.split('/').pop();
+                subEventMedia.media_url = process.env.IMAGE_URL + eventToInvite?.media;
+                subEventMedia.type = 'media';
+              }
+            
+              reply = replacePlaceholders(eventToInvite.eventText, reformData);
+            
+              const response = await sendMessageFunc({ ...sendMessageObj, ...subEventMedia, message: reply });
+            }
+
             const NewChatLog = await ChatLogs.findOneAndUpdate(
               {
                 senderNumber: remoteId,
@@ -1351,8 +820,8 @@ const recieveMessagesV2 = async (req, res)=>{
               {
                 $set: {
                   inviteStatus: 'Pending',
-                  messageTrack: 1,
-                  inviteIndex: 0,
+                  messageTrack: 2,
+                  inviteIndex: index,
                   isCompleted: false,
                   updatedAt: Date.now(),
                 }
@@ -1401,9 +870,8 @@ const recieveMessagesV2 = async (req, res)=>{
                     sendMessageObj.type = 'media';
                   }
 
-                  reply = campaign.subEventInvitation
+                  reply = eventToInvite?.eventText
                 }else{
-                  console.log('else of nextInvite')
                   previousChatLog['inviteIndex'] = campaign.subEventDetails.length;
                   previousChatLog['isCompleted'] = true;
                   previousChatLog['messageTrack'] = 3;
@@ -1421,8 +889,7 @@ const recieveMessagesV2 = async (req, res)=>{
                   
                   if(nextInvite){
                     previousChatLog['inviteIndex'] = nextInvite;
-                   
-                    reply = campaign?.subEventInvitation;
+                    reply = eventToInvite?.eventText;
                   }else{
                     previousChatLog['inviteIndex'] = dayIndex;
                     previousChatLog['isCompleted'] = true;
@@ -1473,11 +940,9 @@ const recieveMessagesV2 = async (req, res)=>{
   
             reformData={
               ...inviteToSend?.toObject(),
-              ...eventToInvite,
               ...senderId?.toObject(),
               }
   
-            console.log(reformData)
 
             reply = replacePlaceholders(reply, reformData)
             const response = await sendMessageFunc({ ...sendMessageObj, message: reply });
@@ -1486,41 +951,80 @@ const recieveMessagesV2 = async (req, res)=>{
             await senderId.save();
             return res.send('acceptMessageSent')
 
-          } else if(codeType === campaign.rejectCode){
-            previousChatLog['messageTrack']=3;
-            previousChatLog['finalResponse']=message.toLowerCase();
-            previousChatLog.updatedAt= Date.now();
-            let reply = campaign?.messageForRejection
+          } else if(codeType === campaign.rejectCode) {
+            previousChatLog['messageTrack'] = 3;
+            previousChatLog['finalResponse'] = message.toLowerCase();
+            previousChatLog.updatedAt = Date.now();
+            let reply = campaign?.rejectionAcknowledgment;
 
-            if(true){
-              if(senderId.inviteStatus==='Accepted' && code[2]<senderId.attendeesCount){
-                senderId.lastResponse = message;
-                senderId.lastResponseUpdatedAt= Date.now();
-                senderId.attendeesCount = (+senderId.attendeesCount)-(+code[2])
-                await senderId.save()
-                reply = campaign?.acceptanceAcknowledgment
-                if(campaign?.thankYouMedia){              
-                  sendMessageObj.filename = campaign?.thankYouMedia.split('/').pop();
-                  sendMessageObj.media_url= process.env.IMAGE_URL+campaign?.thankYouMedia;
-                  sendMessageObj.type = 'media';
-                }
+            const dayIndex = code[2]; // e.g., 1 (if exists)
+            const inviteCount = code[3]; // e.g., number of invites to reject
 
-              }else{
-                senderId.lastResponse = message;
-                senderId.lastResponseUpdatedAt= Date.now();
-                senderId.inviteStatus ='Rejected';
-                senderId.attendeesCount = '0'
-                await senderId.save()
-                previousChatLog.inviteStatus = 'Rejected';
-              }
+           if (dayIndex) {
+           // Day-specific rejection logic
+           const invitedDay = senderId.days[+dayIndex - 1];
+
+           if (inviteCount) {
+            // Reducing the invitesAccepted count for the specified day
+            const invitesAcceptedNum = parseInt(invitedDay.invitesAccepted || '0', 10);
+            const inviteCountNum = parseInt(inviteCount, 10);
+
+            invitedDay.invitesAccepted = (invitesAcceptedNum - inviteCountNum).toString();
+
+            if (parseInt(invitedDay.invitesAccepted, 10) <= 0) {
+                invitedDay.invitesAccepted = '0';
+                invitedDay.inviteStatus = 'Rejected'; // Fully rejected
+				
+            } else {
+                invitedDay.inviteStatus = 'Accepted'; // Still accepted if invites remain
             }
+          } else {
+            // If no invite count provided, fully reject the invites for the specified day
+            invitedDay.invitesAccepted = '0';
+            invitedDay.inviteStatus = 'Rejected';
+           }
 
-            await previousChatLog.save()
-            const response = await sendMessageFunc({...sendMessageObj,message: reply }); 
+           senderId.days[+dayIndex - 1] = invitedDay; // Update the day status
+		    const hasRemainingAcceptedOrPending = senderId.days.some(day => 
+             day.inviteStatus === 'Accepted' || day.inviteStatus === 'Pending'
+          );
 
-            return res.send('rejectmessageSend')
-
+          if (!hasRemainingAcceptedOrPending) {
+             senderId.overAllStatus = 'Rejected'; // No accepted or pending invites left, set overAllStatus to 'Rejected'
           }
+         } else {
+        // Rejection for all days
+          senderId.days = senderId.days.map(day => {
+            if (day.invitesAllocated && day.invitesAllocated !== '0') {
+                day.inviteStatus = 'Rejected';
+                day.invitesAccepted = '0'; // Set all invitesAccepted to 0
+            }
+            return day;
+		   });
+
+        senderId.overAllStatus = 'Rejected';
+        senderId.hasCompletedForm = true;
+    }
+
+    // Update previousChatLog for inviteIndex and status
+    previousChatLog.inviteStatus = 'Rejected';
+    previousChatLog.isCompleted = true;
+
+    senderId.lastResponse = message;
+    senderId.lastResponseUpdatedAt = Date.now();
+
+    await senderId.save();
+    await previousChatLog.save();
+
+    // Send response with rejection acknowledgment
+    const response = await sendMessageFunc({ 
+        ...sendMessageObj, 
+        message: reply 
+    });
+
+    return res.send('rejectMessageSent');
+}
+
         }
         return res.send('nothing')
       }
@@ -1541,7 +1045,7 @@ const recieveMessagesV2 = async (req, res)=>{
               return res.send('Account not found')
             }
           }
-          if(campaign.startingKeyword.toLowerCase() === message.toLowerCase()){
+          if(campaign.startingKeyword && campaign.startingKeyword.toLowerCase() === message.toLowerCase()){
             const currentTime = moment();
            
             const startingTime = moment(campaign.startDate)
@@ -1596,24 +1100,65 @@ const recieveMessagesV2 = async (req, res)=>{
           const response =  await sendMessageFunc({...sendMessageObj,message: 'Nothing to cancel' });
           return res.send(true);
         }
-        previousChatLog['messageTrack']=1
+        previousChatLog['messageTrack']=2
+
         previousChatLog['finalResponse']=''
         previousChatLog['inviteStatus']='Pending'
-        await previousChatLog.save()
+		    previousChatLog['isCompleted']=false;
+		
         if(true){
           senderId.lastResponse = '';
           senderId.lastResponseUpdatedAt= Date.now();
-          senderId.inviteStatus ='Pending';
-          senderId.attendeesCount='0'
-          senderId.save();
+          senderId.overAllStatus ='Pending';
+          senderId.hasCompletedForm = false;
+          senderId.days = senderId.days.map((day) => {
+              if (day.invitesAllocated && day.invitesAllocated !== '0') {
+                day.inviteStatus = 'Pending'; // Reset to Pending
+                day.invitesAccepted = '0'; // Reset to 0
+              }
+              return day;
+            });
+		
         }
         let reply = campaign?.invitationText
+        let inviteMedia = {}
           if(campaign?.invitationMedia){              
-            sendMessageObj.filename = campaign?.invitationMedia.split('/').pop();
-            sendMessageObj.media_url= process.env.IMAGE_URL+campaign?.invitationMedia;
-            sendMessageObj.type = 'media';
+            inviteMedia.filename = campaign?.invitationMedia.split('/').pop();
+            inviteMedia.media_url= process.env.IMAGE_URL+campaign?.invitationMedia;
+            inviteMedia.type = 'media';
           }
-        const response =  await sendMessageFunc({...sendMessageObj,message: reply });
+        const response =  await sendMessageFunc({...sendMessageObj, ...inviteMedia, message: reply });
+
+        const index = senderId.days.findIndex(
+          (ele) => ele.invitesAllocated && ele.invitesAllocated !== '0'
+        );
+        previousChatLog['inviteIndex'] = index;
+        const inviteToSend = index !== -1 ? senderId.days[index] : null;
+        const eventToInvite = campaign.subEventDetails[index];
+      
+        if (inviteToSend && eventToInvite) {
+          // Reform data for invitation message
+          const reformData = {
+            ...inviteToSend?.toObject(),
+            ...senderId?.toObject(),
+          };
+        
+          // Check if the event has associated media and update sendMessageObj accordingly
+          let subEventMedia = {};
+          if (eventToInvite?.media) {
+            subEventMedia.filename = eventToInvite?.media.split('/').pop();
+            subEventMedia.media_url = process.env.IMAGE_URL + eventToInvite?.media;
+            subEventMedia.type = 'media';
+          }
+        
+          // Replace placeholders with reform data in the message template
+          reply = replacePlaceholders(eventToInvite.eventText, reformData);
+        
+          const response = await sendMessageFunc({ ...sendMessageObj, ...subEventMedia, message: reply });
+        }
+        await senderId.save();
+        await previousChatLog.save()
+
         return res.send('after change message')
       }
 
@@ -1634,23 +1179,21 @@ const recieveMessagesV2 = async (req, res)=>{
         
         if(previousChatLog['messageTrack'] === 1 && acceptregex.test(message.trim())){
           console.log('step 1')
-            const index = contact.days.findIndex(ele => ele.invitesAllocated && ele.inviteStatus === 'Pending');
+            const index = contact.days.findIndex(ele => ele.invitesAllocated && ele.invitesAllocated!='0' && ele.inviteStatus === 'Pending');
             const inviteToSend = index !== -1 ? contact.days[index] : null;
             const eventToInvite = campaign.subEventDetails[index]
   
             reformData={
               ...inviteToSend?.toObject(),
-              ...eventToInvite,
               ...contact?.toObject(),
               }
-  
-            console.log(reformData)
+
             if(eventToInvite?.media){              
               sendMessageObj.filename = eventToInvite?.media.split('/').pop();
               sendMessageObj.media_url= process.env.IMAGE_URL+eventToInvite?.media;
               sendMessageObj.type = 'media';
             }
-            const reply = replacePlaceholders(campaign.subEventInvitation, reformData)
+            const reply = replacePlaceholders(eventToInvite.eventText, reformData)
             const response = await sendMessageFunc({...sendMessageObj,message: reply });
             previousChatLog['messageTrack'] ++;
             previousChatLog['inviteStatus'] = 'Accepted';
@@ -1678,7 +1221,6 @@ const recieveMessagesV2 = async (req, res)=>{
           return res.send('Type Change First')
 
         }else {
-          console.log('step 3')
           if(campaign.hasSubEvent && previousChatLog['inviteIndex'] < campaign.subEventDetails.length){
             console.log('step 4')
             const dayInvite = contact.days[previousChatLog['inviteIndex']]
@@ -1690,13 +1232,12 @@ const recieveMessagesV2 = async (req, res)=>{
                 contact.days[previousChatLog['inviteIndex']].invitesAccepted = dayInvite.invitesAllocated;
                 contact.days[previousChatLog['inviteIndex']].inviteStatus = 'Accepted';
 
-                const index = contact.days.findIndex(ele => ele.invitesAllocated && ele.inviteStatus === 'Pending');
+                const index = contact.days.findIndex(ele => ele.invitesAllocated && ele.invitesAllocated!='0' && ele.inviteStatus === 'Pending');
                 const inviteToSend = index !== -1 ? contact.days[index] : null;
                 const eventToInvite = campaign.subEventDetails[index]
       
                 reformData={
                   ...inviteToSend?.toObject(),
-                  ...eventToInvite,
                   ...contact?.toObject()
                   }
     
@@ -1708,7 +1249,8 @@ const recieveMessagesV2 = async (req, res)=>{
                       sendMessageObj.media_url= process.env.IMAGE_URL+eventToInvite?.media;
                       sendMessageObj.type = 'media';
                     }
-                    reply = replacePlaceholders(campaign.subEventInvitation, reformData)
+					console.log('reformData 1',reformData)
+                    reply = replacePlaceholders(eventToInvite.eventText, reformData)
                   }else{
                     previousChatLog['inviteIndex'] ++;
                     previousChatLog['isCompleted'] = true;
@@ -1749,18 +1291,20 @@ const recieveMessagesV2 = async (req, res)=>{
                 return null; // or any default value you want to return if neither is found
               }
             }
+            console.log('dayInvite', dayInvite)
             if(numbersString !== null && (numbersString == dayInvite.invitesAllocated.toLowerCase() || (dayInvite.invitesAllocated.toLowerCase() === "all" || (!isNaN(numbersString) && +numbersString <= dayInvite.invitesAllocated)))){
               console.log('step 8')
               contact.days[previousChatLog['inviteIndex']].invitesAccepted = numbersString;
               contact.days[previousChatLog['inviteIndex']].inviteStatus = 'Accepted';
-  
-              const index = contact.days.findIndex(ele => ele.invitesAllocated && ele.inviteStatus === 'Pending');
+              previousChatLog['inviteStatus'] = 'Accepted';
+              contact['overAllStatus'] = 'Accepted';
+
+              const index = contact.days.findIndex(ele => ele.invitesAllocated && ele.invitesAllocated!='0' && ele.inviteStatus === 'Pending');
               const inviteToSend = index !== -1 ? contact.days[index] : null;
               const eventToInvite = campaign.subEventDetails[index]
     
               reformData={
                 ...inviteToSend?.toObject(),
-                ...eventToInvite,
                 ...contact?.toObject()
                 }
   
@@ -1772,13 +1316,14 @@ const recieveMessagesV2 = async (req, res)=>{
                     sendMessageObj.media_url= process.env.IMAGE_URL+eventToInvite?.media;
                     sendMessageObj.type = 'media';
                   }
-                  reply = replacePlaceholders(campaign.subEventInvitation, reformData)
+                  reply = replacePlaceholders(eventToInvite.eventText, reformData)
                 }else{
                   previousChatLog['inviteIndex'] ++;
                   previousChatLog['isCompleted'] = true;
                   previousChatLog['messageTrack'] ++;
                   previousChatLog['inviteStatus'] = 'Accepted';
                   contact['hasCompletedForm'] = true;
+                  contact['overAllStatus'] = 'Accepted';
                   if(campaign?.thankYouMedia){              
                     sendMessageObj.filename = campaign?.thankYouMedia.split('/').pop();
                     sendMessageObj.media_url= process.env.IMAGE_URL+campaign?.thankYouMedia;
@@ -1793,27 +1338,33 @@ const recieveMessagesV2 = async (req, res)=>{
                 return res.send('sending invite message')
             }else if(rejectregex.test(message.trim())){
               console.log('step 9')
-              contact.days[previousChatLog['inviteIndex']].invitesAccepted = message;
+              contact.days[previousChatLog['inviteIndex']].invitesAccepted = 0;
               contact.days[previousChatLog['inviteIndex']].inviteStatus = 'Rejected';
-              const index = contact.days.findIndex(ele => ele.invitesAllocated && ele.inviteStatus === 'Pending');
+              const index = contact.days.findIndex(ele => ele.invitesAllocated && ele.invitesAllocated!='0' && ele.inviteStatus === 'Pending');
               if(index==-1){
                 if(campaign?.thankYouMedia){              
                   sendMessageObj.filename = campaign?.thankYouMedia.split('/').pop();
                   sendMessageObj.media_url= process.env.IMAGE_URL+campaign?.thankYouMedia;
                   sendMessageObj.type = 'media';
                 }
-                let reply = campaign?.acceptanceAcknowledgment
+                let reply = campaign?.rejectionAcknowledgment
+                previousChatLog['inviteIndex'] = campaign?.subEventDetails.length;
+                previousChatLog['isCompleted'] = true;
+                previousChatLog['messageTrack'] ++;
+
+                contact['hasCompletedForm'] = true;
+                contact.save();
+                previousChatLog.save();
+
                 const response = await sendMessageFunc({...sendMessageObj,message: reply }); 
-                return res.send('rejection send')
+
+                return res.send('acceptance send')
               }
               const inviteToSend = index !== -1 ? contact.days[index] : null;
               const eventToInvite = campaign.subEventDetails[index]
     
-              console.log('eventToInvite', eventToInvite);
-    
               reformData={
                 ...inviteToSend?.toObject(),
-                ...eventToInvite,
                 ...contact?.toObject()
                 }
     
@@ -1825,7 +1376,7 @@ const recieveMessagesV2 = async (req, res)=>{
                     sendMessageObj.media_url= process.env.IMAGE_URL+eventToInvite?.media;
                     sendMessageObj.type = 'media';
                   }
-                  reply = replacePlaceholders(campaign.subEventInvitation, reformData)
+                  reply = replacePlaceholders(eventToInvite.eventText, reformData)
                 }else{
                   previousChatLog['inviteIndex'] ++;
                   previousChatLog['isCompleted'] = true;
@@ -1836,7 +1387,7 @@ const recieveMessagesV2 = async (req, res)=>{
                     sendMessageObj.media_url= process.env.IMAGE_URL+campaign?.thankYouMedia;
                     sendMessageObj.type = 'media';
                   }
-                  reply = replacePlaceholders(campaign.acceptanceAcknowledgment, reformData)
+                  reply = replacePlaceholders(campaign.rejectionAcknowledgment, reformData)
                 }
                 const response = await sendMessageFunc({...sendMessageObj,message: reply });
               await previousChatLog.save();
@@ -1849,9 +1400,6 @@ const recieveMessagesV2 = async (req, res)=>{
 
           }
         } 
-        // console.log('contact', contact);
-        // console.log('campaign', campaign);
-        // console.log('previousChatLog', previousChatLog);
         
       }
 
@@ -2620,6 +2168,13 @@ const fetchDashBoardStats = async(req, res)=>{
   return res.send(statsBody)
 }
 
+const formatDate = (dateString) => {
+  const date = new Date(dateString);
+  const day = String(date.getDate()).padStart(2, '0'); // Add leading zero if needed
+  const month = String(date.getMonth() + 1).padStart(2, '0'); // Months are zero-based
+  const year = date.getFullYear();
+  return `${day}/${month}/${year}`;
+};
 
 module.exports = {
   saveContact,

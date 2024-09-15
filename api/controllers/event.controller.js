@@ -130,10 +130,23 @@ exports.saveOrUpdateCampaign = async (req, res) => {
       await Message.deleteMany({ eventId });
   
       await Contact.updateMany(
-        { eventId: eventId },
-        {
-          $set: { lastResponse: "", inviteStatus: "Pending" , attendeesCount: "0"}
+       { eventId: eventId },
+       {
+        $set: {
+          lastResponse: "",
+          overAllStatus: "Pending",
+          hasCompletedForm : false,
+          "days.$[day].inviteStatus": "Pending",   // Set inviteStatus to 'Pending'
+          "days.$[day].invitesAccepted": "0"      // Set invitesAccepted to '0'
         }
+      },
+      {
+       arrayFilters: [
+         {
+           "day.invitesAllocated": { $exists: true, $ne: '0' }  // Only update days with invitesAllocated
+         }
+        ]
+       }
       );
   
       res.status(200).json({ message: 'Chats for the campaign deleted successfully' });
