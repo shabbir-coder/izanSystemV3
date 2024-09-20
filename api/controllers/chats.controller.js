@@ -115,7 +115,7 @@ const saveContactsInBulk = async(req, res) => {
 const getContact = async(req, res)=>{
     try {
       let query = {};
-      const { page = 1, limit = 10, searchtext, eventId, filter, day } = req.query;
+      const { page = 1, limit = 10, searchtext, eventId, filter, day ,inviteStatus} = req.query;
 
       if (eventId) {
         query.eventId = eventId;
@@ -141,6 +141,9 @@ const getContact = async(req, res)=>{
       } else if (filter) {
         // If no day is provided but filter (status) is, filter by overAllStatus
         query.overAllStatus = filter;
+      }
+      if(inviteStatus){
+        query.inviteMessageStatus = inviteStatus;
       }
 
       console.log({query})
@@ -221,67 +224,6 @@ const getMessages = async (req, res)=>{
       }
 }
 
-const processContact1 = async (number, instance, campaign, messageTrack,  message, media, mime, messageType) => {
-  const sendMessageObj = {
-    number: number,
-    type: 'text',
-    instance_id: instance?.instance_id,
-  }; 
-
-    let reply = message;
-    if (media) {
-      sendMessageObj.filename = media.split('/').pop();
-      sendMessageObj.media_url = process.env.IMAGE_URL + media;
-      sendMessageObj.type = 'media';
-    }
-
-
-    const response = await sendMessageFunc({ ...sendMessageObj, message: reply });
-    
-    const updateContact = await Contact.findOne({number, eventId: campaign?._id })
-    // console.log(updateContact)
-
-    if(messageType==='invite'){
-      updateContact.overAllStatus='Pending',
-      updateContact.hasCompletedForm = false;
-    }else{
-      return
-    }
-
-    updateContact.days = updateContact.days.map((day) => {
-      if (day.invitesAllocated && day.invitesAllocated !== '0') {
-        day.inviteStatus = 'Pending';
-        day.invitesAccepted = '0';
-      }
-      return day;
-    });
-
-    const NewChatLog = await ChatLogs.findOneAndUpdate(
-      {
-        senderNumber: number,
-        instanceId: instance?.instance_id,
-        eventId: campaign._id,
-      },
-      {
-        $set: {
-          messageTrack: messageTrack,
-          finalResponse:'',
-          isCompleted: false,
-          inviteStatus: updateContact.overAllStatus,
-          updatedAt: Date.now(),
-        },
-        $unset :{
-          inviteIndex: 1
-        }
-      },
-      {
-        upsert: true,
-        new: true,
-      }
-    );
-    await updateContact.save()
-  
-};
 
 const processContact = async (number, instance, campaign, messageTrack,  message, media, mime, messageType) => {
 
@@ -337,9 +279,10 @@ const processContact = async (number, instance, campaign, messageTrack,  message
    // Update the contact's overall status and day-specific details
    contact.overAllStatus = 'Pending';
    contact.hasCompletedForm = false;
+   contact.inviteMessageStatus = 'Pending';
 
    contact.days = contact.days.map((day) => {
-     if (day.invitesAllocated && day.invitesAllocated !== '0') {
+     if (day.invitesAllocated && day.invitesAllocated !== '0' || day.invitesAccepted !== '0') {
        day.inviteStatus = 'Pending';
        day.invitesAccepted = '0';
      }
@@ -396,6 +339,7 @@ const sendBulkMessage = async (req, res) => {
     const senderId = req.user.userId;
     const day = filter.day
     const status = filter.filter
+    const inviteStatus = filter.inviteStatus
 
     let messageNumbers = number;
 
@@ -413,8 +357,10 @@ const sendBulkMessage = async (req, res) => {
       } else if (status) {
         contactQuery.overAllStatus = status;
       }
+      if(inviteStatus){
+        contactQuery.inviteMessageStatus = inviteStatus;
+      }
 
-      
       const contacts = await Contact.find(contactQuery);
       
       messageNumbers = contacts.map(contact => contact.number);
@@ -465,7 +411,7 @@ const sendMessages = async (req, res)=>{
   
       if(messageType==='invite'){
         updateContact.inviteStatus='Pending',
-        updateContact.attendeesCount='0'
+        updateContact['inviteMessageStatus'] = 'Pending',
         updateContact.updatedAt = Date.now()
         await updateContact.save()
       }else if(messageType==='accept'){
@@ -474,7 +420,6 @@ const sendMessages = async (req, res)=>{
         await updateContact.save()
       }else if(messageType==='rejection'){
         updateContact.updatedAt = Date.now()
-        updateContact.attendeesCount = '0'
         updateContact.inviteStatus='Rejected',
         await updateContact.save()
       }
@@ -1353,8 +1298,8 @@ const recieveMessagesV2 = async (req, res)=>{
                 previousChatLog['messageTrack'] ++;
 
                 contact['hasCompletedForm'] = true;
-                contact.save();
-                previousChatLog.save();
+                await contact.save();
+                await previousChatLog.save();
 
                 const response = await sendMessageFunc({...sendMessageObj,message: reply }); 
 
@@ -1431,7 +1376,15 @@ const recieveMessagesV2 = async (req, res)=>{
         if (!message) {
           continue;
         };
-    
+
+        const contact = await Contact.findOne({number: message.senderNumber, eventId: message.eventId})
+        if(contact?.inviteMessageStatus!=='Readed'){
+          console.log('status', elem.update?.status)
+          contact['inviteMessageStatus']= elem.update?.status === 4?'Readed': 'Recieved';
+          contact['updatedAt'] = Date.now();
+          await contact.save()
+        }
+        
         let newStatus = {
           status: elem.update?.status,  // Replace with the actual status name
           time: new Date()            // Set the actual time or use a specific date
@@ -1455,7 +1408,6 @@ const recieveMessagesV2 = async (req, res)=>{
 
 
 const sendMessageFunc = async (message, data={})=>{
-  console.log(message)
   const instance = await Instance.findOne({
     instance_id: message.instance_id
   }).sort({ updatedAt: -1 })
@@ -1845,149 +1797,6 @@ async function getFullReport(startDate, endDate, id, eventId, rejectregex) {
   }
 }
 
-async function getStats2(eventId, startDate, endDate) {
-  if (startDate && endDate) {
-    dateFilter = {
-      createdAt: {
-        $gte: new Date(startDate),
-        $lt: new Date(endDate)
-      }
-    };
-  }
-
-  try {
-    const [stats, totalContacts, totalGuests] = await Promise.all([
-      Contact.aggregate([
-        {
-          $match: {
-            eventId: eventId.toString()
-          }
-        },
-        {
-          $facet: {
-            totalEntries: [{ $count: "count" }],
-            totalYesResponses: [
-              { $match: { inviteStatus: 'Accepted' } },
-              { $count: "count" }
-            ],
-            totalNoResponses: [
-              { $match: { inviteStatus: 'Rejected' } },
-              { $count: "count" }
-            ],
-            totalPendingResponses: [
-              { $match: { inviteStatus: 'Pending' } },
-              { $count: "count" }
-            ]
-          }
-        }
-      ]).then(result => result[0]),
-
-      Contact.aggregate([
-        {
-          $match: {
-            eventId: eventId.toString(),
-          }
-        },
-        {
-          $count: 'totalContacts'
-        }
-      ]).then(result => (result[0] ? result[0].totalContacts : 0)),
-
-      Contact.aggregate([
-        {
-          $match: {
-            eventId: eventId.toString(),
-          }
-        },
-        {
-          $group: {
-            _id: null,
-            totalGuests: { $sum: { $toInt: "$attendeesCount" } }
-          }
-        }
-      ]).then(result => (result[0] ? result[0].totalGuests : 0))
-    
-    ]);
-
-    console.log('stats', stats, totalContacts, totalGuests)
-    const totalYesResponses = stats.totalYesResponses[0] ? stats.totalYesResponses[0].count : 0;
-    const totalNoResponses = stats.totalNoResponses[0] ? stats.totalNoResponses[0].count : 0;
-    const totalPendingResponses = stats.totalPendingResponses[0] ? stats.totalPendingResponses[0].count : 0;
-
-    return {
-      totalContacts,
-      yes: totalYesResponses,
-      guestCount: totalGuests,
-      no: totalNoResponses,
-      balance: totalPendingResponses
-    };
-  } catch (error) {
-    console.error('Error getting stats:', error);
-    throw error; // Ensure errors are thrown to be handled by the calling function
-  }
-}
-
-async function getStats(eventId) {
-  try {
-    // Step 1: Fetch all contacts related to the event
-    const contacts = await Contact.find({ eventId: eventId.toString() });
-    
-    // Initialize variables
-    let totalContacts = contacts.length;
-    let totalYesContacts = 0;
-    let totalNoContacts = 0;
-    let totalLeft = 0;
-    const dayStats = {};
-
-    contacts.forEach(contact => {
-      // Step 2: Count overall status (Yes, No, Left)
-      if (contact.overAllStatus === 'Accepted' ) {
-        totalYesContacts++;
-      } else if (contact.overAllStatus === 'Rejected') {
-        totalNoContacts++;
-      } else {
-        totalLeft++;
-      }
-
-      // Step 3: Loop through each day in the contact's `days` array
-      contact.days.forEach((day, index) => {
-        // Initialize the day if not already done
-        if (!dayStats[`Day_${index + 1}`]) {
-          dayStats[`Day_${index + 1}`] = {
-            yes: 0,
-            no: 0,
-            pending: 0,
-            totalAccepted: 0
-          };
-        }
-
-        // Increment values based on the day's status
-        if (day.inviteStatus === 'Accepted') {
-          dayStats[`Day_${index + 1}`].yes++;
-        } else if (day.inviteStatus === 'Rejected') {
-          dayStats[`Day_${index + 1}`].no++;
-        } else if (day.inviteStatus === 'Pending') {
-          dayStats[`Day_${index + 1}`].pending++;
-        }
-
-        // Sum invites allocated and accepted for the day
-        dayStats[`Day_${index + 1}`].totalAccepted += parseInt(day.invitesAccepted, 10);
-      });
-    });
-
-    // Step 4: Return the aggregated statistics
-    return {
-      totalContacts,
-      totalYesContacts,
-      totalNoContacts,
-      dayStats,
-      totalLeft
-    };
-  } catch (error) {
-    console.error('Error getting stats:', error);
-    throw error; // Ensure errors are thrown to be handled by the calling function
-  }
-}
 
 async function getStats1(eventId) {
   try {

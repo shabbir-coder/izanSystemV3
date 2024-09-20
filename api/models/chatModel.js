@@ -20,6 +20,7 @@ const contactSchema = new mongoose.Schema({
   isAdmin: {type: Boolean, default: false},
 
   createdBy: {type: mongoose.Types.ObjectId},
+  inviteMessageStatus: {type: String, default: 'Pending'},
   instanceId: {type: String},
   eventId: {type: String},
   
