@@ -552,8 +552,9 @@ const recieveMessagesV2 = async (req, res)=>{
           return res.send(true);
         }
         const rejectregex = new RegExp(`\\b${tempEvent.RejectionKeyword}\\b`, 'i');
+        const events = tempEvent.subEventDetails.map((ele)=>ele.eventName)
 
-        const fileName = await getReportdataByTime(start,end, recieverId?._id, tempEvent?._id ,rejectregex)
+        const fileName = await getReportdataByTime(start,end, recieverId?._id, tempEvent?._id ,events)
         // console.log('fileName', fileName)
         // const fileName = 'http://5.189.156.200:84/uploads/reports/Report-1716394369435.csv'
         sendMessageObj.filename = fileName.split('/').pop();
@@ -1584,7 +1585,7 @@ const formatDate = (date) => {
 };
 
 
-async function getReportdataByTime(startDate, endDate, id, eventId, rejectregex) {
+async function getReportdataByTime(startDate, endDate, id, eventId, eventsName) {
   let dateFilter = {};
   if (startDate && endDate) {
     dateFilter = {
@@ -1657,27 +1658,24 @@ async function getReportdataByTime(startDate, endDate, id, eventId, rejectregex)
 
     let data = await Contact.aggregate(query);
 
-    console.log('data', data)
-
     data = data.map(ele => {
       let dayInfo = ele.days.map((day, index) => {
         if (day.invitesAllocated === 0) {
-          return `Day${index + 1}: not invited`;
+          return `not invited`;
         } else {
-          return `Day${index + 1}: ${day.invitesAllocated}/${day.invitesAccepted}`;
+          return `${day.invitesAllocated}/${day.invitesAccepted}`;
         }
       });
 
       return {
         Name: ele.Name,
         'Phone Number': ele.PhoneNumber,
-        ...dayInfo.reduce((acc, val, idx) => ({ ...acc, [`Day${idx + 1}`]: val }), {}),
+        ...dayInfo.reduce((acc, val, idx) => ({ ...acc, [`${eventsName[idx]}`]: val }), {}),
         Status: ele.overAllStatus,
         'Updated At': formatDate(ele.UpdatedAt)
       };
     });
 
-    console.log('data----', data)
 
     const fileName = `Report-${Date.now()}.xlsx`;
     const filePath = `uploads/reports/${fileName}`;
