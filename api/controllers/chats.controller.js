@@ -1467,10 +1467,9 @@ function replacePlaceholders(message, data) {
   return message.replace(/{(\w+)}/g, (_, key) => data[key] || `{${key}}`);
 }
 
-
-
 const getReport = async (req, res) => {
   const { fromDate, toDate } = req.query;
+  const {id} = req.params;
   let startDate, endDate;
 
   if (fromDate && toDate) {
@@ -1478,112 +1477,17 @@ const getReport = async (req, res) => {
     endDate = new Date(toDate);
   }
 
-  let dateFilter = {};
-  if (startDate && endDate) { // If both startDate and endDate are defined, add a date range filter
-    dateFilter = {
-      "updatedAt": {
-        $gte: startDate,
-        $lt: endDate
-      }
-    };
-  }
+  const event = await Event.findOne({_id:id})
+  const events = event.subEventDetails.map((ele)=>ele.eventName)
 
-  let query = [
-    {
-      $lookup: {
-        from: 'chatlogs',
-        let: { contactITS: '$ITS' },
-        pipeline: [
-          {
-            $match: {
-              $expr: {
-                $and: [
-                  { $eq: ['$requestedITS', '$$contactITS'] },
-                  { $eq: ['$instance_id', req.params.id] },
-                  { $gte: ['$updatedAt', startDate] },
-                  { $lt: ['$updatedAt', endDate] }
-                ]
-              }
-            }
-          }
-        ],
-        as: 'chatlog'
-      }
-    },
-    { $unwind: { path: '$chatlog', preserveNullAndEmptyArrays: true } },
-    {
-      $addFields: {
-        PhoneNumber: { $toString: '$number' }  // Assuming `number` is directly in contacts
-      }
-    },
-    {
-      $project: {
-        _id: 0,
-        ITS: '$ITS',
-        Name: '$name',
-        PhoneNumber: 1,
-        updatedAt: '$chatlog.updatedAt',
-        Status: '$chatlog.messageTrack',
-        Venue: '$chatlog.otherMessages.venue',
-        Response: '$chatlog.otherMessages.profile'
-      }
-    }
-  ];
+  const fileName = await getReportdataByTime(startDate,endDate, '', event?._id , events)
+  const filename = fileName.split('/').pop();
+  const fileUrl = process.env.IMAGE_URL+fileName;
 
-  try {
-
-const formatDate = (date) => {
-      if (!date || isNaN(new Date(date).getTime())) {
-        return ''; // Return blank if date is invalid
-      }
-      const options = { 
-        year: 'numeric', 
-        month: '2-digit', 
-        day: '2-digit', 
-        hour: '2-digit', 
-        minute: '2-digit', 
-        hour12: true 
-      };
-      return new Date(date).toLocaleString('en-US', options).replace(',', '');
-    };
-
-    let data = await Contact.aggregate(query);
-    data = data.map(ele=>({
-      ...ele,
-      'updatedAt': formatDate(ele.updatedAt),
-      Venue: getNames('venue', ele?.Venue),
-      Response: getNames('profile', ele?.Response),
-    }))
-
-    const fileName = `Report-${Date.now()}.csv`
-    const filePath = `uploads/reports/${fileName}`;
-    const csvWriter = createCsvWriter({
-      path: filePath,
-      header: [
-        { id: 'Name', title: 'Name' },
-        { id: 'PhoneNumber', title: 'PhoneNumber' },
-        { id: 'ITS', title: 'ITS' },
-        { id: 'updatedAt', title: 'Updated At' },
-        { id: 'Venue', title: 'Venue' },
-        { id: 'Response', title: 'Response' },
-        { id: 'Status', title: 'Status' },
-      ]
-    });
-
-    await csvWriter.writeRecords(data);
-
-    res.setHeader('Content-Type', 'text/csv');
-    res.setHeader('Content-Disposition', `attachment; filename=${fileName}`);
-
-    const fileStream = fs.createReadStream(filePath);
-    fileStream.pipe(res);
-
-  } catch (error) {
-    console.error(error);
-    res.status(500).send('Internal Server Error');
-  }
+  return res.status(200).send({
+    fileUrl, filename
+  });
 };
-
 
 async function getReportdataByTime(startDate, endDate, id, eventId, eventsName) {
   let dateFilter = {};
@@ -1704,7 +1608,6 @@ async function getFullReport(startDate, endDate, id, eventId, rejectregex) {
     };
   }
 
-  // console.log('instance', id)
   let query = [
     {
       $match: { eventId: eventId.toString(), }
@@ -1724,6 +1627,8 @@ async function getFullReport(startDate, endDate, id, eventId, rejectregex) {
               }
             }
           },
+          { $sort: { createdAt: -1 } }, // Sort by date in descending order
+          { $limit: 1 } // Take only the latest chatlog
         ],
         as: 'chatlog'
       }
@@ -1739,12 +1644,9 @@ async function getFullReport(startDate, endDate, id, eventId, rejectregex) {
         _id: 0,
         Name: '$name',
         PhoneNumber: { $toString: '$number' },
-        invites: '$invites',
-        'UpdatedAt': { $ifNull: [{ $dateToString: { format: '%Y-%m-%d %H:%M:%S', date: '$updatedAt' } }, ''] },
-
-        Status: '$inviteStatus',
-        finalResponse: 1,
-        attendeesCount: 1
+        days: '$days',
+        overAllStatus: '$overAllStatus',
+        UpdatedAt: { $ifNull: [{ $dateToString: { format: '%Y-%m-%d %H:%M:%S', date: '$updatedAt' } }, ''] }
       }
     }
   ];
@@ -1767,17 +1669,24 @@ async function getFullReport(startDate, endDate, id, eventId, rejectregex) {
 
     let data = await Contact.aggregate(query);
 
-    // console.log(data)
+    data = data.map(ele => {
+      let dayInfo = ele.days.map((day, index) => {
+        if (day.invitesAllocated === 0) {
+          return `not invited`;
+        } else {
+          return `${day.invitesAllocated}/${day.invitesAccepted}`;
+        }
+      });
 
-    data = data.map(ele => ({
-      Name: ele.Name,
-      'Phone Number': ele.PhoneNumber,
-      Invites: ele.invites,
-      'Updated At': formatDate(ele['UpdatedAt']),
-      Status: ele.Status,
-      'Last Response': ele.finalResponse,
-      'Guest Count': ele.attendeesCount
-    }));
+      return {
+        Name: ele.Name,
+        'Phone Number': ele.PhoneNumber,
+        ...dayInfo.reduce((acc, val, idx) => ({ ...acc, [`${eventsName[idx]}`]: val }), {}),
+        Status: ele.overAllStatus,
+        'Updated At': formatDate(ele.UpdatedAt)
+      };
+    });
+
 
     const fileName = `Report-${Date.now()}.xlsx`;
     const filePath = `uploads/reports/${fileName}`;
