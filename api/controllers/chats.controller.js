@@ -587,14 +587,14 @@ const recieveMessagesV2 = async (req, res)=>{
           return res.send(true);
         }
 
-        const replyObj = await getStats1(tempEvent?._id);
+        const replyObj = await getDayStats(tempEvent?._id);
 
         let replyMessage = '*Statistics*';
         replyMessage += '\n';
-        replyMessage += `\n› Total nos of Invitees: *${replyObj?.totalContacts}*`;
-        replyMessage += `\n› Yes: *${replyObj?.totalYesContacts}*`;
-        replyMessage += `\n› No: *${replyObj?.totalNoContacts}*`;
-        replyMessage += `\n› Balance: *${replyObj?.totalLeft}*`;
+        // replyMessage += `\n› Total nos of Invitees: *${replyObj?.totalContacts}*`;
+        // replyMessage += `\n› Yes: *${replyObj?.totalYesContacts}*`;
+        // replyMessage += `\n› No: *${replyObj?.totalNoContacts}*`;
+        // replyMessage += `\n› Balance: *${replyObj?.totalLeft}*`;
 
         replyMessage += '\n\n*Day-wise Breakdown*\n';
 
@@ -1571,11 +1571,22 @@ async function getReportdataByTime(startDate, endDate, id, eventId, eventsName) 
         }
       });
 
+      let status = "Not Invited"; // Default status
+      ele.days.forEach(day => {
+        if (day?.inviteStatus === "Accepted") {
+          status = "Accepted";
+        } else if (day?.inviteStatus === "Pending" && status !== "Accepted") {
+          status = "Pending";
+        } else if (day?.inviteStatus === "Rejected" && status !== "Accepted" && status !== "Pending") {
+          status = "Rejected";
+        }
+      });
+
       return {
         Name: ele.Name,
         'Phone Number': ele.PhoneNumber,
         ...dayInfo.reduce((acc, val, idx) => ({ ...acc, [`${eventsName[idx]}`]: val }), {}),
-        Status: ele.overAllStatus,
+        Status: status,
         'Updated At': formatDate(ele.UpdatedAt)
       };
     });
@@ -1705,7 +1716,7 @@ async function getFullReport(startDate, endDate, id, eventId, rejectregex) {
 }
 
 
-async function getStats1(eventId) {
+async function getDayStats(eventId) {
   try {
     // Step 1: Use MongoDB's aggregation framework to compute the statistics directly in the database
     const result = await Contact.aggregate([
@@ -1783,60 +1794,60 @@ async function getStats1(eventId) {
       },
 
       // Step 6: Merge the overall statistics
-      {
-        $lookup: {
-          from: "contacts",
-          localField: "_id",
-          foreignField: "eventId",
-          as: "contacts",
-        },
-      },
-      {
-        $addFields: {
-          totalContacts: { $size: "$contacts" },
-          totalYesContacts: {
-            $size: {
-              $filter: {
-                input: "$contacts",
-                as: "contact",
-                cond: { $eq: ["$$contact.overAllStatus", "Accepted"] },
-              },
-            },
-          },
-          totalNoContacts: {
-            $size: {
-              $filter: {
-                input: "$contacts",
-                as: "contact",
-                cond: { $eq: ["$$contact.overAllStatus", "Rejected"] },
-              },
-            },
-          },
-          totalLeft: {
-            $size: {
-              $filter: {
-                input: "$contacts",
-                as: "contact",
-                cond: {
-                  $and: [
-                    { $ne: ["$$contact.overAllStatus", "Accepted"] },
-                    { $ne: ["$$contact.overAllStatus", "Rejected"] },
-                  ],
-                },
-              },
-            },
-          },
-        },
-      },
+      // {
+      //   $lookup: {
+      //     from: "contacts",
+      //     localField: "_id",
+      //     foreignField: "eventId",
+      //     as: "contacts",
+      //   },
+      // },
+      // {
+      //   $addFields: {
+      //     totalContacts: { $size: "$contacts" },
+      //     totalYesContacts: {
+      //       $size: {
+      //         $filter: {
+      //           input: "$contacts",
+      //           as: "contact",
+      //           cond: { $eq: ["$$contact.overAllStatus", "Accepted"] },
+      //         },
+      //       },
+      //     },
+      //     totalNoContacts: {
+      //       $size: {
+      //         $filter: {
+      //           input: "$contacts",
+      //           as: "contact",
+      //           cond: { $eq: ["$$contact.overAllStatus", "Rejected"] },
+      //         },
+      //       },
+      //     },
+      //     totalLeft: {
+      //       $size: {
+      //         $filter: {
+      //           input: "$contacts",
+      //           as: "contact",
+      //           cond: {
+      //             $and: [
+      //               { $ne: ["$$contact.overAllStatus", "Accepted"] },
+      //               { $ne: ["$$contact.overAllStatus", "Rejected"] },
+      //             ],
+      //           },
+      //         },
+      //       },
+      //     },
+      //   },
+      // },
 
       // Step 7: Project the final output to match the desired format
       {
         $project: {
           _id: 0,
-          totalContacts: 1,
-          totalYesContacts: 1,
-          totalNoContacts: 1,
-          totalLeft: 1,
+          // totalContacts: 1,
+          // totalYesContacts: 1,
+          // totalNoContacts: 1,
+          // totalLeft: 1,
           dayStats: {
             $arrayToObject: {
               $map: {
@@ -1877,10 +1888,11 @@ async function getStats1(eventId) {
   }
 }
 
+
 const fetchDashBoardStats = async(req, res)=>{
   const {eventId, instance_id} = req.body
   const instance = await Instance.findOne({_id:instance_id})
-  const statsBody = await getStats1(eventId, instance, '','')
+  const statsBody = await getDayStats(eventId, instance, '','')
   return res.send(statsBody)
 }
 
