@@ -29,6 +29,8 @@ const EventSchema = new mongoose.Schema({
   messageForMoreThanOneInvites: { type: String, required: true },
   messageForClosedInvitations: { type: String},
 
+  summaryMessage: { type: String, required: true},
+
   RewriteKeyword: { type: String, required: true },
   ReportKeyword: { type: String, required: true },
   StatsKeyword: { type: String, required: true },
